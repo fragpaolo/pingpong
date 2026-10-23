@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<title>Ping Pong</title>
+<style>
+  * { box-sizing: border-box; }
+  html { height: 100%; }
+  body {
+    margin: 0;
+    min-height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #111;
+    color: #eee;
+    font-family: system-ui, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+  #wrap { position: relative; }
+  canvas {
+    display: block;
+    background: #1d5c3a;
+    border: 3px solid #eee;
+    max-height: 95vh;
+    max-width: 95vw;
+    touch-action: none;
+  }
+  #menu {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: rgba(0, 0, 0, 0.85);
+    padding: 16px;
+    text-align: center;
+    overflow-y: auto;
+  }
+  #menu.hidden, .hidden { display: none !important; }
+  h1 { margin: 0; font-size: 28px; letter-spacing: 2px; }
+  .modes { display: flex; gap: 8px; }
+  .player { width: 100%; max-width: 300px; }
+  .player h2 { margin: 0 0 8px; font-size: 16px; }
+  .row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin: 4px 0;
+  }
+  button {
+    font: inherit;
+    cursor: pointer;
+    border: 1px solid #888;
+    background: #222;
+    color: #eee;
+    padding: 4px 10px;
+    border-radius: 4px;
+    min-width: 110px;
+  }
+  button.waiting { background: #c90; color: #000; }
+  .modes button { padding: 8px 12px; }
+  .modes button.selected { background: #eee; color: #111; border-color: #eee; }
+  #start { background: #2a7; border-color: #2a7; padding: 8px 24px; font-size: 18px; }
+  #menuBtn {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    min-width: 0;
+    padding: 4px 8px;
+    font-size: 13px;
+    background: rgba(0, 0, 0, 0.4);
+    border-color: rgba(255, 255, 255, 0.4);
+  }
+  .hint { font-size: 13px; color: #aaa; margin: 0; }
+  /* On touch screens the keyboard settings are not needed. */
+  @media (pointer: coarse) {
+    .player, .hint.keys { display: none; }
+  }
+  @media (pointer: fine) {
+    .hint.touch { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="400" height="600"></canvas>
+  <button id="menuBtn" class="hidden">Menu</button>
+  <div id="menu">
+    <h1>PING PONG</h1>
+    <div class="modes">
+      <button data-mode="1">1 giocatore</button>
+      <button data-mode="2">2 giocatori</button>
+    </div>
+    <div class="player" data-player="1">
+      <h2>Giocatore 2 (in alto)</h2>
+      <div class="row">Sinistra <button data-action="left"></button></div>
+      <div class="row">Destra <button data-action="right"></button></div>
+      <div class="row">Servizio <button data-action="serve"></button></div>
+    </div>
+    <div class="player" data-player="0">
+      <h2>Giocatore 1 (in basso)</h2>
+      <div class="row">Sinistra <button data-action="left"></button></div>
+      <div class="row">Destra <button data-action="right"></button></div>
+      <div class="row">Servizio <button data-action="serve"></button></div>
+    </div>
+    <p class="hint keys">Clicca un tasto e poi premi quello che vuoi usare.<br>Si gioca fino a 11. Esc torna a questo menu.</p>
+    <p class="hint touch">Trascina il dito nella tua metà del campo per muovere la racchetta, poi solleva il dito per servire.<br>Si gioca fino a 11.</p>
+    <button id="start">Gioca</button>
+  </div>
+</div>
+<script>
+(function () {
+  const W = 400, H = 600;
+  const PADDLE_W = 70, PADDLE_H = 10, PADDLE_SPEED = 360;
+  const BALL_R = 6, BALL_SPEED = 300, BALL_MAX = 650, BALL_ACCEL = 1.05;
+  const CPU_SPEED = 280, CPU_SERVE_DELAY = 0.8;
+  const WIN_SCORE = 11;
+  const STORAGE_KEY = 'pingpong-keys';
+  const MODE_KEY = 'pingpong-mode';
+
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const menu = document.getElementById('menu');
+  const menuBtn = document.getElementById('menuBtn');
+  const isTouch = window.matchMedia('(pointer: coarse)').matches;
+
+  // Player 0 is at the bottom, player 1 at the top.
+  const DEFAULT_KEYS = [
+    { left: 'KeyA', right: 'KeyD', serve: 'KeyW' },
+    { left: 'ArrowLeft', right: 'ArrowRight', serve: 'ArrowDown' }
+  ];
+  let keys = loadKeys();
+  let mode = loadMode(); // 1 = against the computer, 2 = two players
+
+  const players = [
+    { x: W / 2, y: H - 30, score: 0 },
+    { x: W / 2, y: 30 - PADDLE_H, score: 0 }
+  ];
+  const ball = { x: 0, y: 0, vx: 0, vy: 0 };
+  let state = 'menu'; // menu | serve | play | over
+  let server = 0;
+  let winner = -1;
+  let waitingFor = null; // { player, action } while choosing a key
+  const pressed = new Set();
+  const touchX = [null, null]; // finger position for each player, if any
+  const touches = new Map(); // touch id -> { player, serve }
+  const cpu = { serveTimer: 0, aimOffset: 0 };
+
+  function isCpu(p) { return mode === 1 && p === 1; }
+
+  function loadKeys() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+      if (saved && saved.length === 2) return saved;
+    } catch (e) {}
+    return JSON.parse(JSON.stringify(DEFAULT_KEYS));
+  }
+
+  function saveKeys() {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(keys)); } catch (e) {}
+  }
+
+  function loadMode() {
+    try { if (localStorage.getItem(MODE_KEY) === '2') return 2; } catch (e) {}
+    return 1;
+  }
+
+  function keyLabel(code) {
+    const names = {
+      ArrowLeft: '←', ArrowRight: '→', ArrowUp: '↑', ArrowDown: '↓',
+      Space: 'Spazio', Enter: 'Invio', ShiftLeft: 'Shift sx', ShiftRight: 'Shift dx',
+      ControlLeft: 'Ctrl sx', ControlRight: 'Ctrl dx'
+    };
+    if (names[code]) return names[code];
+    if (code.startsWith('Key')) return code.slice(3);
+    if (code.startsWith('Digit')) return code.slice(5);
+    if (code.startsWith('Numpad')) return 'Num ' + code.slice(6);
+    return code;
+  }
+
+  function isGameKey(code) {
+    return keys.some(k => k.left === code || k.right === code || k.serve === code);
+  }
+
+  function playerName(p) {
+    if (isCpu(p)) return 'il computer';
+    return 'il Giocatore ' + (p + 1);
+  }
+
+  // ---- Menu: mode and key configuration ----
+
+  function refreshMenu() {
+    document.querySelectorAll('.modes button').forEach(btn => {
+      btn.classList.toggle('selected', Number(btn.dataset.mode) === mode);
+    });
+    document.querySelector('.player[data-player="1"]').classList.toggle('hidden', mode === 1);
+    document.querySelectorAll('.player').forEach(div => {
+      const p = Number(div.dataset.player);
+      div.querySelectorAll('button').forEach(btn => {
+        const action = btn.dataset.action;
+        const waiting = waitingFor && waitingFor.player === p && waitingFor.action === action;
+        btn.textContent = waiting ? 'Premi un tasto…' : keyLabel(keys[p][action]);
+        btn.classList.toggle('waiting', waiting);
+      });
+    });
+  }
+
+  document.querySelectorAll('.modes button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      mode = Number(btn.dataset.mode);
+      try { localStorage.setItem(MODE_KEY, String(mode)); } catch (e) {}
+      btn.blur();
+      refreshMenu();
+    });
+  });
+
+  document.querySelectorAll('.player button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const p = Number(btn.closest('.player').dataset.player);
+      waitingFor = { player: p, action: btn.dataset.action };
+      refreshMenu();
+      btn.blur();
+    });
+  });
+
+  function assignKey(code) {
+    const { player, action } = waitingFor;
+    const old = keys[player][action];
+    // If the key is already used elsewhere, swap the two so no key is shared.
+    keys.forEach(k => {
+      for (const a in k) if (k[a] === code) k[a] = old;
+    });
+    keys[player][action] = code;
+    waitingFor = null;
+    saveKeys();
+    refreshMenu();
+  }
+
+  document.getElementById('start').addEventListener('click', e => {
+    e.target.blur();
+    startMatch();
+  });
+
+  menuBtn.addEventListener('click', e => {
+    e.target.blur();
+    showMenu();
+  });
+
+  // Called by the Android app when the back button is pressed.
+  window.pingpongBack = function () {
+    if (state === 'menu') return false;
+    showMenu();
+    return true;
+  };
+
+  // ---- Keyboard input ----
+
+  window.addEventListener('keydown', e => {
+    if (waitingFor) {
+      e.preventDefault();
+      if (e.code === 'Escape') { waitingFor = null; refreshMenu(); }
+      else assignKey(e.code);
+      return;
+    }
+    if (e.code === 'Escape' && state !== 'menu') {
+      showMenu();
+      return;
+    }
+    if (isGameKey(e.code)) e.preventDefault();
+    pressed.add(e.code);
+
+    if (state === 'serve' && !isCpu(server) && e.code === keys[server].serve) launchBall();
+    else if (state === 'over' && (e.code === keys[0].serve || e.code === keys[1].serve)) startMatch();
+  });
+
+  window.addEventListener('keyup', e => pressed.delete(e.code));
+  window.addEventListener('blur', () => pressed.clear());
+
+  // ---- Touch input ----
+
+  function toCanvas(t) {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: (t.clientX - r.left) / r.width * W,
+      y: (t.clientY - r.top) / r.height * H
+    };
+  }
+
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (state === 'over') { startMatch(); return; }
+    for (const t of e.changedTouches) {
+      const pt = toCanvas(t);
+      const p = mode === 1 || pt.y > H / 2 ? 0 : 1;
+      // Lifting a finger serves only if the touch began while waiting to serve.
+      touches.set(t.identifier, { player: p, serve: state === 'serve' && server === p });
+      touchX[p] = pt.x;
+    }
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      const info = touches.get(t.identifier);
+      if (info) touchX[info.player] = toCanvas(t).x;
+    }
+  }, { passive: false });
+
+  function endTouch(e) {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      const info = touches.get(t.identifier);
+      if (!info) continue;
+      touches.delete(t.identifier);
+      const stillTouching = [...touches.values()].some(i => i.player === info.player);
+      if (!stillTouching) touchX[info.player] = null;
+      if (info.serve && state === 'serve' && server === info.player) launchBall();
+    }
+  }
+  canvas.addEventListener('touchend', endTouch, { passive: false });
+  canvas.addEventListener('touchcancel', endTouch, { passive: false });
+
+  // ---- Game logic ----
+
+  function showMenu() {
+    state = 'menu';
+    menu.classList.remove('hidden');
+    menuBtn.classList.add('hidden');
+    refreshMenu();
+  }
+
+  function startMatch() {
+    players.forEach(p => { p.score = 0; p.x = W / 2; });
+    server = 0;
+    winner = -1;
+    touches.clear();
+    touchX[0] = touchX[1] = null;
+    menu.classList.add('hidden');
+    menuBtn.classList.remove('hidden');
+    state = 'serve';
+  }
+
+  // Server changes every 2 points, and every point once both reach 10.
+  function updateServer() {
+    const total = players[0].score + players[1].score;
+    const deuce = players[0].score >= WIN_SCORE - 1 && players[1].score >= WIN_SCORE - 1;
+    if (deuce) server = total % 2;
+    else server = Math.floor(total / 2) % 2;
+    cpu.serveTimer = CPU_SERVE_DELAY;
+  }
+
+  function launchBall() {
+    const dir = server === 0 ? -1 : 1;
+    const angle = (Math.random() - 0.5) * 0.6;
+    ball.vx = Math.sin(angle) * BALL_SPEED;
+    ball.vy = Math.cos(angle) * BALL_SPEED * dir;
+    if (server === 0) newCpuAim();
+    state = 'play';
+  }
+
+  function pointTo(p) {
+    players[p].score++;
+    const a = players[p].score, b = players[1 - p].score;
+    if (a >= WIN_SCORE && a - b >= 2) {
+      winner = p;
+      state = 'over';
+      return;
+    }
+    updateServer();
+    state = 'serve';
+  }
+
+  // The computer aims a little off centre each time, so it sometimes misses.
+  function newCpuAim() {
+    cpu.aimOffset = (Math.random() - 0.5) * PADDLE_W * 1.3;
+  }
+
+  // Where the ball will cross height y, following its bounces off the side walls.
+  function predictX(y) {
+    if (ball.vy === 0) return ball.x;
+    const t = (y - ball.y) / ball.vy;
+    if (t < 0) return ball.x;
+    const span = W - 2 * BALL_R;
+    let x = (ball.x - BALL_R + ball.vx * t) % (2 * span);
+    if (x < 0) x += 2 * span;
+    if (x > span) x = 2 * span - x;
+    return x + BALL_R;
+  }
+
+  function cpuDirection(dt) {
+    const p = players[1];
+    let target = W / 2;
+    if (state === 'serve' && server === 1) {
+      cpu.serveTimer -= dt;
+      if (cpu.serveTimer <= 0) launchBall();
+    } else if (state === 'play' && ball.vy < 0) {
+      target = predictX(p.y + PADDLE_H + BALL_R) + cpu.aimOffset;
+    }
+    if (Math.abs(target - p.x) < 4) return 0;
+    return target > p.x ? 1 : -1;
+  }
+
+  function movePaddles(dt) {
+    players.forEach((p, i) => {
+      if (isCpu(i)) {
+        p.x += cpuDirection(dt) * CPU_SPEED * dt;
+      } else if (touchX[i] !== null) {
+        p.x = touchX[i];
+      } else {
+        let dir = 0;
+        if (pressed.has(keys[i].left)) dir -= 1;
+        if (pressed.has(keys[i].right)) dir += 1;
+        p.x += dir * PADDLE_SPEED * dt;
+      }
+      p.x = Math.max(PADDLE_W / 2, Math.min(W - PADDLE_W / 2, p.x));
+    });
+  }
+
+  function placeBallOnServer() {
+    const p = players[server];
+    ball.x = p.x;
+    ball.y = server === 0 ? p.y - BALL_R - 1 : p.y + PADDLE_H + BALL_R + 1;
+  }
+
+  function bounceOff(p, goingUp) {
+    // Where the ball hits the paddle decides the outgoing angle.
+    const offset = (ball.x - p.x) / (PADDLE_W / 2);
+    const speed = Math.min(Math.hypot(ball.vx, ball.vy) * BALL_ACCEL, BALL_MAX);
+    const angle = offset * 1.0; // up to about 57 degrees
+    ball.vx = Math.sin(angle) * speed;
+    ball.vy = Math.cos(angle) * speed * (goingUp ? -1 : 1);
+    if (goingUp) newCpuAim();
+  }
+
+  function moveBall(dt) {
+    ball.x += ball.vx * dt;
+    ball.y += ball.vy * dt;
+
+    if (ball.x < BALL_R) { ball.x = BALL_R; ball.vx = Math.abs(ball.vx); }
+    if (ball.x > W - BALL_R) { ball.x = W - BALL_R; ball.vx = -Math.abs(ball.vx); }
+
+    const bottom = players[0], top = players[1];
+    if (ball.vy > 0 &&
+        ball.y + BALL_R >= bottom.y && ball.y + BALL_R <= bottom.y + PADDLE_H + ball.vy * dt &&
+        Math.abs(ball.x - bottom.x) <= PADDLE_W / 2 + BALL_R) {
+      ball.y = bottom.y - BALL_R;
+      bounceOff(bottom, true);
+    }
+    if (ball.vy < 0 &&
+        ball.y - BALL_R <= top.y + PADDLE_H && ball.y - BALL_R >= top.y + ball.vy * dt &&
+        Math.abs(ball.x - top.x) <= PADDLE_W / 2 + BALL_R) {
+      ball.y = top.y + PADDLE_H + BALL_R;
+      bounceOff(top, false);
+    }
+
+    if (ball.y - BALL_R > H) pointTo(1);
+    else if (ball.y + BALL_R < 0) pointTo(0);
+  }
+
+  function update(dt) {
+    if (state === 'menu') return;
+    movePaddles(dt);
+    if (state === 'serve') placeBallOnServer();
+    else if (state === 'play') moveBall(dt);
+  }
+
+  // ---- Drawing ----
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+
+    // Net and centre line
+    ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+    ctx.setLineDash([8, 8]);
+    ctx.beginPath();
+    ctx.moveTo(0, H / 2);
+    ctx.lineTo(W, H / 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Scores
+    ctx.fillStyle = 'rgba(255,255,255,0.35)';
+    ctx.font = 'bold 64px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(players[1].score, W / 2, H / 2 - 60);
+    ctx.fillText(players[0].score, W / 2, H / 2 + 60);
+
+    // Paddles
+    ctx.fillStyle = '#fff';
+    players.forEach(p => ctx.fillRect(p.x - PADDLE_W / 2, p.y, PADDLE_W, PADDLE_H));
+
+    if (state === 'serve' || state === 'play') {
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffb000';
+      ctx.fill();
+    }
+
+    ctx.fillStyle = '#fff';
+    ctx.font = '16px system-ui, sans-serif';
+    if (state === 'serve') {
+      const y = server === 0 ? H - 70 : 70;
+      let text;
+      if (isCpu(server)) text = 'Serve il computer';
+      else if (isTouch) text = 'Solleva il dito per servire';
+      else text = 'Servizio: premi ' + keyLabel(keys[server].serve);
+      ctx.fillText(text, W / 2, y);
+    } else if (state === 'over') {
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(0, H / 2 - 50, W, 100);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 26px system-ui, sans-serif';
+      let title = 'Vince ' + playerName(winner) + '!';
+      if (mode === 1) title = winner === 0 ? 'Hai vinto!' : 'Vince il computer!';
+      ctx.fillText(title, W / 2, H / 2 - 14);
+      ctx.font = '15px system-ui, sans-serif';
+      ctx.fillText(isTouch ? 'Tocca per rigiocare' : 'Servizio per rigiocare, Esc per il menu', W / 2, H / 2 + 20);
+    }
+  }
+
+  let last = performance.now();
+  function loop(now) {
+    const dt = Math.min((now - last) / 1000, 0.05);
+    last = now;
+    update(dt);
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  showMenu();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
