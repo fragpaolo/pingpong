@@ -1,0 +1,39 @@
+plugins {
+    id 'com.android.application'
+}
+
+// The game itself is the index.html at the root of the repository.
+def webDir = layout.buildDirectory.dir("generated/web").get().asFile
+
+tasks.register('copyWeb', Copy) {
+    from rootProject.file('../index.html')
+    into webDir
+}
+
+android {
+    namespace 'it.fragpaolo.pingpong'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'it.fragpaolo.pingpong'
+        minSdk 21
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+
+    sourceSets {
+        main {
+            assets.srcDirs += webDir
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+android.applicationVariants.configureEach { variant ->
+    variant.mergeAssetsProvider.configure { dependsOn 'copyWeb' }
+}

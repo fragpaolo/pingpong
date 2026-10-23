@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Green table with two paddles and the ball, like the game screen. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path android:fillColor="#1D5C3A" android:pathData="M6,2h36a4,4 0 0 1 4,4v36a4,4 0 0 1 -4,4h-36a4,4 0 0 1 -4,-4v-36a4,4 0 0 1 4,-4z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M16,8h16v3h-16z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M16,37h16v3h-16z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M4,23.5h40v1h-40z" />
+    <path android:fillColor="#FFB000" android:pathData="M28,29a3,3 0 1 0 6,0a3,3 0 1 0 -6,0z" />
+</vector>

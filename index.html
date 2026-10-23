@@ -2,19 +2,22 @@
 <html lang="it">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
 <title>Ping Pong</title>
 <style>
   * { box-sizing: border-box; }
+  html { height: 100%; }
   body {
     margin: 0;
-    min-height: 100vh;
+    min-height: 100%;
     display: flex;
     align-items: center;
     justify-content: center;
     background: #111;
     color: #eee;
     font-family: system-ui, sans-serif;
+    user-select: none;
+    -webkit-user-select: none;
   }
   #wrap { position: relative; }
   canvas {
@@ -23,6 +26,7 @@
     border: 3px solid #eee;
     max-height: 95vh;
     max-width: 95vw;
+    touch-action: none;
   }
   #menu {
     position: absolute;
@@ -31,13 +35,15 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 16px;
+    gap: 12px;
     background: rgba(0, 0, 0, 0.85);
     padding: 16px;
     text-align: center;
+    overflow-y: auto;
   }
-  #menu.hidden { display: none; }
+  #menu.hidden, .hidden { display: none !important; }
   h1 { margin: 0; font-size: 28px; letter-spacing: 2px; }
+  .modes { display: flex; gap: 8px; }
   .player { width: 100%; max-width: 300px; }
   .player h2 { margin: 0 0 8px; font-size: 16px; }
   .row {
@@ -57,15 +63,39 @@
     min-width: 110px;
   }
   button.waiting { background: #c90; color: #000; }
+  .modes button { padding: 8px 12px; }
+  .modes button.selected { background: #eee; color: #111; border-color: #eee; }
   #start { background: #2a7; border-color: #2a7; padding: 8px 24px; font-size: 18px; }
+  #menuBtn {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    min-width: 0;
+    padding: 4px 8px;
+    font-size: 13px;
+    background: rgba(0, 0, 0, 0.4);
+    border-color: rgba(255, 255, 255, 0.4);
+  }
   .hint { font-size: 13px; color: #aaa; margin: 0; }
+  /* On touch screens the keyboard settings are not needed. */
+  @media (pointer: coarse) {
+    .player, .hint.keys { display: none; }
+  }
+  @media (pointer: fine) {
+    .hint.touch { display: none; }
+  }
 </style>
 </head>
 <body>
 <div id="wrap">
   <canvas id="game" width="400" height="600"></canvas>
+  <button id="menuBtn" class="hidden">Menu</button>
   <div id="menu">
     <h1>PING PONG</h1>
+    <div class="modes">
+      <button data-mode="1">1 giocatore</button>
+      <button data-mode="2">2 giocatori</button>
+    </div>
     <div class="player" data-player="1">
       <h2>Giocatore 2 (in alto)</h2>
       <div class="row">Sinistra <button data-action="left"></button></div>
@@ -78,7 +108,8 @@
       <div class="row">Destra <button data-action="right"></button></div>
       <div class="row">Servizio <button data-action="serve"></button></div>
     </div>
-    <p class="hint">Clicca un tasto e poi premi quello che vuoi usare.<br>Si gioca fino a 11. Esc torna a questo menu.</p>
+    <p class="hint keys">Clicca un tasto e poi premi quello che vuoi usare.<br>Si gioca fino a 11. Esc torna a questo menu.</p>
+    <p class="hint touch">Trascina il dito nella tua metà del campo per muovere la racchetta, poi solleva il dito per servire.<br>Si gioca fino a 11.</p>
     <button id="start">Gioca</button>
   </div>
 </div>
@@ -87,12 +118,16 @@
   const W = 400, H = 600;
   const PADDLE_W = 70, PADDLE_H = 10, PADDLE_SPEED = 360;
   const BALL_R = 6, BALL_SPEED = 300, BALL_MAX = 650, BALL_ACCEL = 1.05;
+  const CPU_SPEED = 280, CPU_SERVE_DELAY = 0.8;
   const WIN_SCORE = 11;
   const STORAGE_KEY = 'pingpong-keys';
+  const MODE_KEY = 'pingpong-mode';
 
   const canvas = document.getElementById('game');
   const ctx = canvas.getContext('2d');
   const menu = document.getElementById('menu');
+  const menuBtn = document.getElementById('menuBtn');
+  const isTouch = window.matchMedia('(pointer: coarse)').matches;
 
   // Player 0 is at the bottom, player 1 at the top.
   const DEFAULT_KEYS = [
@@ -100,6 +135,7 @@
     { left: 'ArrowLeft', right: 'ArrowRight', serve: 'ArrowDown' }
   ];
   let keys = loadKeys();
+  let mode = loadMode(); // 1 = against the computer, 2 = two players
 
   const players = [
     { x: W / 2, y: H - 30, score: 0 },
@@ -109,8 +145,13 @@
   let state = 'menu'; // menu | serve | play | over
   let server = 0;
   let winner = -1;
-  let waitingFor = null; // { player, action, button } while choosing a key
+  let waitingFor = null; // { player, action } while choosing a key
   const pressed = new Set();
+  const touchX = [null, null]; // finger position for each player, if any
+  const touches = new Map(); // touch id -> { player, serve }
+  const cpu = { serveTimer: 0, aimOffset: 0 };
+
+  function isCpu(p) { return mode === 1 && p === 1; }
 
   function loadKeys() {
     try {
@@ -122,6 +163,11 @@
 
   function saveKeys() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(keys)); } catch (e) {}
+  }
+
+  function loadMode() {
+    try { if (localStorage.getItem(MODE_KEY) === '2') return 2; } catch (e) {}
+    return 1;
   }
 
   function keyLabel(code) {
@@ -141,9 +187,18 @@
     return keys.some(k => k.left === code || k.right === code || k.serve === code);
   }
 
-  // ---- Menu: key configuration ----
+  function playerName(p) {
+    if (isCpu(p)) return 'il computer';
+    return 'il Giocatore ' + (p + 1);
+  }
 
-  function refreshButtons() {
+  // ---- Menu: mode and key configuration ----
+
+  function refreshMenu() {
+    document.querySelectorAll('.modes button').forEach(btn => {
+      btn.classList.toggle('selected', Number(btn.dataset.mode) === mode);
+    });
+    document.querySelector('.player[data-player="1"]').classList.toggle('hidden', mode === 1);
     document.querySelectorAll('.player').forEach(div => {
       const p = Number(div.dataset.player);
       div.querySelectorAll('button').forEach(btn => {
@@ -155,11 +210,20 @@
     });
   }
 
+  document.querySelectorAll('.modes button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      mode = Number(btn.dataset.mode);
+      try { localStorage.setItem(MODE_KEY, String(mode)); } catch (e) {}
+      btn.blur();
+      refreshMenu();
+    });
+  });
+
   document.querySelectorAll('.player button').forEach(btn => {
     btn.addEventListener('click', () => {
       const p = Number(btn.closest('.player').dataset.player);
       waitingFor = { player: p, action: btn.dataset.action };
-      refreshButtons();
+      refreshMenu();
       btn.blur();
     });
   });
@@ -174,7 +238,7 @@
     keys[player][action] = code;
     waitingFor = null;
     saveKeys();
-    refreshButtons();
+    refreshMenu();
   }
 
   document.getElementById('start').addEventListener('click', e => {
@@ -182,12 +246,24 @@
     startMatch();
   });
 
-  // ---- Input ----
+  menuBtn.addEventListener('click', e => {
+    e.target.blur();
+    showMenu();
+  });
+
+  // Called by the Android app when the back button is pressed.
+  window.pingpongBack = function () {
+    if (state === 'menu') return false;
+    showMenu();
+    return true;
+  };
+
+  // ---- Keyboard input ----
 
   window.addEventListener('keydown', e => {
     if (waitingFor) {
       e.preventDefault();
-      if (e.code === 'Escape') { waitingFor = null; refreshButtons(); }
+      if (e.code === 'Escape') { waitingFor = null; refreshMenu(); }
       else assignKey(e.code);
       return;
     }
@@ -198,26 +274,74 @@
     if (isGameKey(e.code)) e.preventDefault();
     pressed.add(e.code);
 
-    if (state === 'serve' && e.code === keys[server].serve) launchBall();
+    if (state === 'serve' && !isCpu(server) && e.code === keys[server].serve) launchBall();
     else if (state === 'over' && (e.code === keys[0].serve || e.code === keys[1].serve)) startMatch();
   });
 
   window.addEventListener('keyup', e => pressed.delete(e.code));
   window.addEventListener('blur', () => pressed.clear());
 
+  // ---- Touch input ----
+
+  function toCanvas(t) {
+    const r = canvas.getBoundingClientRect();
+    return {
+      x: (t.clientX - r.left) / r.width * W,
+      y: (t.clientY - r.top) / r.height * H
+    };
+  }
+
+  canvas.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (state === 'over') { startMatch(); return; }
+    for (const t of e.changedTouches) {
+      const pt = toCanvas(t);
+      const p = mode === 1 || pt.y > H / 2 ? 0 : 1;
+      // Lifting a finger serves only if the touch began while waiting to serve.
+      touches.set(t.identifier, { player: p, serve: state === 'serve' && server === p });
+      touchX[p] = pt.x;
+    }
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', e => {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      const info = touches.get(t.identifier);
+      if (info) touchX[info.player] = toCanvas(t).x;
+    }
+  }, { passive: false });
+
+  function endTouch(e) {
+    e.preventDefault();
+    for (const t of e.changedTouches) {
+      const info = touches.get(t.identifier);
+      if (!info) continue;
+      touches.delete(t.identifier);
+      const stillTouching = [...touches.values()].some(i => i.player === info.player);
+      if (!stillTouching) touchX[info.player] = null;
+      if (info.serve && state === 'serve' && server === info.player) launchBall();
+    }
+  }
+  canvas.addEventListener('touchend', endTouch, { passive: false });
+  canvas.addEventListener('touchcancel', endTouch, { passive: false });
+
   // ---- Game logic ----
 
   function showMenu() {
     state = 'menu';
     menu.classList.remove('hidden');
-    refreshButtons();
+    menuBtn.classList.add('hidden');
+    refreshMenu();
   }
 
   function startMatch() {
     players.forEach(p => { p.score = 0; p.x = W / 2; });
     server = 0;
     winner = -1;
+    touches.clear();
+    touchX[0] = touchX[1] = null;
     menu.classList.add('hidden');
+    menuBtn.classList.remove('hidden');
     state = 'serve';
   }
 
@@ -227,6 +351,7 @@
     const deuce = players[0].score >= WIN_SCORE - 1 && players[1].score >= WIN_SCORE - 1;
     if (deuce) server = total % 2;
     else server = Math.floor(total / 2) % 2;
+    cpu.serveTimer = CPU_SERVE_DELAY;
   }
 
   function launchBall() {
@@ -234,6 +359,7 @@
     const angle = (Math.random() - 0.5) * 0.6;
     ball.vx = Math.sin(angle) * BALL_SPEED;
     ball.vy = Math.cos(angle) * BALL_SPEED * dir;
+    if (server === 0) newCpuAim();
     state = 'play';
   }
 
@@ -249,12 +375,48 @@
     state = 'serve';
   }
 
+  // The computer aims a little off centre each time, so it sometimes misses.
+  function newCpuAim() {
+    cpu.aimOffset = (Math.random() - 0.5) * PADDLE_W * 1.3;
+  }
+
+  // Where the ball will cross height y, following its bounces off the side walls.
+  function predictX(y) {
+    if (ball.vy === 0) return ball.x;
+    const t = (y - ball.y) / ball.vy;
+    if (t < 0) return ball.x;
+    const span = W - 2 * BALL_R;
+    let x = (ball.x - BALL_R + ball.vx * t) % (2 * span);
+    if (x < 0) x += 2 * span;
+    if (x > span) x = 2 * span - x;
+    return x + BALL_R;
+  }
+
+  function cpuDirection(dt) {
+    const p = players[1];
+    let target = W / 2;
+    if (state === 'serve' && server === 1) {
+      cpu.serveTimer -= dt;
+      if (cpu.serveTimer <= 0) launchBall();
+    } else if (state === 'play' && ball.vy < 0) {
+      target = predictX(p.y + PADDLE_H + BALL_R) + cpu.aimOffset;
+    }
+    if (Math.abs(target - p.x) < 4) return 0;
+    return target > p.x ? 1 : -1;
+  }
+
   function movePaddles(dt) {
     players.forEach((p, i) => {
-      let dir = 0;
-      if (pressed.has(keys[i].left)) dir -= 1;
-      if (pressed.has(keys[i].right)) dir += 1;
-      p.x += dir * PADDLE_SPEED * dt;
+      if (isCpu(i)) {
+        p.x += cpuDirection(dt) * CPU_SPEED * dt;
+      } else if (touchX[i] !== null) {
+        p.x = touchX[i];
+      } else {
+        let dir = 0;
+        if (pressed.has(keys[i].left)) dir -= 1;
+        if (pressed.has(keys[i].right)) dir += 1;
+        p.x += dir * PADDLE_SPEED * dt;
+      }
       p.x = Math.max(PADDLE_W / 2, Math.min(W - PADDLE_W / 2, p.x));
     });
   }
@@ -272,6 +434,7 @@
     const angle = offset * 1.0; // up to about 57 degrees
     ball.vx = Math.sin(angle) * speed;
     ball.vy = Math.cos(angle) * speed * (goingUp ? -1 : 1);
+    if (goingUp) newCpuAim();
   }
 
   function moveBall(dt) {
@@ -343,15 +506,21 @@
     ctx.font = '16px system-ui, sans-serif';
     if (state === 'serve') {
       const y = server === 0 ? H - 70 : 70;
-      ctx.fillText('Servizio: premi ' + keyLabel(keys[server].serve), W / 2, y);
+      let text;
+      if (isCpu(server)) text = 'Serve il computer';
+      else if (isTouch) text = 'Solleva il dito per servire';
+      else text = 'Servizio: premi ' + keyLabel(keys[server].serve);
+      ctx.fillText(text, W / 2, y);
     } else if (state === 'over') {
       ctx.fillStyle = 'rgba(0,0,0,0.6)';
       ctx.fillRect(0, H / 2 - 50, W, 100);
       ctx.fillStyle = '#fff';
       ctx.font = 'bold 26px system-ui, sans-serif';
-      ctx.fillText('Vince il Giocatore ' + (winner + 1) + '!', W / 2, H / 2 - 14);
+      let title = 'Vince ' + playerName(winner) + '!';
+      if (mode === 1) title = winner === 0 ? 'Hai vinto!' : 'Vince il computer!';
+      ctx.fillText(title, W / 2, H / 2 - 14);
       ctx.font = '15px system-ui, sans-serif';
-      ctx.fillText('Servizio per rigiocare, Esc per il menu', W / 2, H / 2 + 20);
+      ctx.fillText(isTouch ? 'Tocca per rigiocare' : 'Servizio per rigiocare, Esc per il menu', W / 2, H / 2 + 20);
     }
   }
 
